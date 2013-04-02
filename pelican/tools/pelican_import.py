@@ -434,6 +434,122 @@ def tumblr2fields(api_key, blogname):
         offset += len(posts)
         posts = get_tumblr_posts(api_key, blogname, offset)
 
+def metaweblog2fields(uri, user, pwd):
+    """Imports metaweblog posts"""
+    import xmlrpclib
+    import xml.parsers.expat as expat
+    from datetime import datetime, timedelta
+    import pprint
+
+    def checkURL(url):
+        try:
+            urllib_request.urlopen(url)
+        except IOError:
+            return False
+        return True
+
+    class BlogError(Exception):
+        METHOD_NOT_SUPPORTED = 'Method not (yet) supported'
+
+        def __init__(self, msg):
+            self.msg  = msg
+
+            def __repr__(self):
+                return self.msg
+
+            __str__ = __repr__
+
+    class Blog:
+        def __init__(self, uri, user, pwd, default_blog_id = None, key = '1'):
+            self.user = user
+            self.pwd = pwd
+            self.key = key
+            if default_blog_id is not None:
+                self.default_blog_id = default_blog_id
+
+            # Check if URL exists
+            if not checkURL(uri):
+                raise BlogError('XML-RPC API URL not found.')
+
+            # Connect to the api. Call listMethods to keep a dictionary of
+            # available methods
+            self._server = xmlrpclib.ServerProxy(uri)
+
+            try:
+                self._methods = self._server.system.listMethods()
+            except xmlrpclib.Fault, fault:
+                raise BlogError(fault.faultString)
+
+            self._methods.sort()
+
+        def execute(self, methodname, *args):
+            if not methodname in self._methods:
+                raise BlogError(BlogError.METHOD_NOT_SUPPORTED)
+
+            try:
+                r = getattr(self._server, methodname)(*args)
+            except xmlrpclib.Fault, fault:
+                raise BlogError(fault.faultString)
+
+            return r
+
+    class MetaWeblog(Blog):
+        def __init__(self, uri, user, pwd, default_blog_id, key):
+            Blog.__init__(self, uri, user, pwd, default_blog_id, key)
+
+        def get_recent_posts(self, numposts = 10, blog_id = None):
+            if blog_id is None:
+                if self.default_blog_id is None:
+                    raise BlogError("No blog_id passed")
+                blog_id = self.default_blog_id
+
+            return self.execute('metaWeblog.getRecentPosts',
+                                blog_id, self.user, self.pwd, numposts)
+
+        def get_post(self, post_id):
+            return self.execute('metaWeblog.getPost', post_id, self.user, self.pwd)
+
+    class Importer:
+        def __init__(self, blog):
+            self._blog = blog;
+            self._cur = 0;
+            self._last = self.__get_last_id()
+
+        def set_current_id(self, cur):
+            self._cur = cur
+
+        def __get_last_id(self):
+            post = self._blog.get_recent_posts(1);
+            return int(post[0]['postid']);
+
+        def get_next_post(self):
+            while (self._cur <= self._last):
+                try:
+                    post = self._blog.get_post(str(self._cur))
+                except:
+                    pass
+                else:
+                    yield post
+                finally:
+                    self._cur = self._cur + 1
+
+
+    importer = Importer(MetaWeblog(uri, user, pwd, '1', '1'))
+    for post in importer.get_next_post():
+        #pp = pprint.PrettyPrinter(indent=4)
+        #pp.pprint(post)
+        date_object = datetime.strptime(post['dateCreated'].value, "%Y%m%dT%H:%M:%S")
+
+        if post['title'].strip() == '':
+            post['title'] = str(post['postid'])
+
+        slug = slugify(date_object.strftime("%Y%m%d") + ' ' + str(post['postid']))
+
+        yield (post['title'], post['description'], slug,
+               date_object.strftime("%Y-%m-%d %H:%M"), 'Víctor Jáquez',
+               post['categories'], [], "wp-html")
+
+
 def feed2fields(file):
     """Read a feed and yield pelican fields"""
     import feedparser
@@ -719,6 +835,8 @@ def main():
         help='Tumblr export')
     parser.add_argument('--feed', action='store_true', dest='feed',
         help='Feed to parse')
+    parser.add_argument('--metaweblog', action='store_true', dest='metaweblog',
+        help='MetaWebLog xmlrpc')
     parser.add_argument('-o', '--output', dest='output', default='output',
         help='Output path')
     parser.add_argument('-m', '--markup', dest='markup', default='rst',
@@ -752,9 +870,9 @@ def main():
              'With this disabled, your Pelican URLs may not be consistent '
              'with your original posts.')
     parser.add_argument('-e', '--email', dest='email',
-        help="Email address (posterous import only)")
+        help="Email address (posterous/metaweblog import only)")
     parser.add_argument('-p', '--password', dest='password',
-        help="Password (posterous import only)")
+        help="Password (posterous/metaweblog import only)")
     parser.add_argument('-b', '--blogname', dest='blogname',
         help="Blog name (Tumblr import only)")
 
@@ -771,6 +889,8 @@ def main():
         input_type = 'tumblr'
     elif args.feed:
         input_type = 'feed'
+    elif args.metaweblog:
+        input_type = 'metaweblog'
     else:
         error = "You must provide either --wpfile, --dotclear, --posterous, --tumblr or --feed options"
         exit(error)
@@ -796,6 +916,8 @@ def main():
         fields = tumblr2fields(args.input, args.blogname)
     elif input_type == 'feed':
         fields = feed2fields(args.input)
+    elif input_type == 'metaweblog':
+        fields = metaweblog2fields(args.input, args.email, args.password)
 
     if args.wp_attach:
         attachments = get_attachments(args.input)
